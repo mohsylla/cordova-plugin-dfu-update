@@ -27,17 +27,19 @@
 
         <config-file target="AndroidManifest.xml" parent="/manifest/application">
             <activity android:name="de.einfachhans.DfuUpdate.NotificationActivity" />
-            <service android:name="de.einfachhans.DfuUpdate.DfuService" />
+            <service android:name="de.einfachhans.DfuUpdate.DfuService" android:foregroundServiceType="connectedDevice" />
         </config-file>
 
         <config-file target="AndroidManifest.xml" parent="/manifest">
-            <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
-            <uses-permission android:name="android.permission.BLUETOOTH"/>
+            <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation"/>
+            <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
+            <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE"/>
             <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+            <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"/>
         </config-file>
 
 
-        <preference name="ANDROID_NORDIC_VERSION" default="1.11.0" />
+        <preference name="ANDROID_NORDIC_VERSION" default="2.5.0" />
         <framework src="no.nordicsemi.android:dfu:$ANDROID_NORDIC_VERSION"/>
         <framework src="androidx.lifecycle:lifecycle-extensions:2.2.0"/>
 
