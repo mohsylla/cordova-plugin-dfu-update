@@ -79,7 +79,7 @@ public class DfuUpdate extends CordovaPlugin {
 			performUpdateFirmware();
 		} else {
 			int REQUEST_PERMS_CODE = 234;
-			cordova.requestPermissions(this, REQUEST_PERMS_CODE, permissions);
+			cordova.requestPermissions(this, REQUEST_PERMS_CODE, requiredPermissions());
 		}
 	}
 
@@ -93,7 +93,23 @@ public class DfuUpdate extends CordovaPlugin {
 	}
 
 	private boolean hasPerms() {
+		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+			// Android 12+ : BLUETOOTH et la localisation ne sont plus les
+			// permissions pertinentes, et BLUETOOTH n'est même plus déclarable.
+			return cordova.hasPermission(Manifest.permission.BLUETOOTH_CONNECT)
+					&& cordova.hasPermission(Manifest.permission.BLUETOOTH_SCAN);
+		}
 		return cordova.hasPermission(COARSE) && cordova.hasPermission(BLUETOOTH);
+	}
+
+	private String[] requiredPermissions() {
+		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+			return new String[] {
+					Manifest.permission.BLUETOOTH_CONNECT,
+					Manifest.permission.BLUETOOTH_SCAN
+			};
+		}
+		return permissions;
 	}
 
 
@@ -110,11 +126,16 @@ public class DfuUpdate extends CordovaPlugin {
 			final DfuServiceInitiator starter = new DfuServiceInitiator(deviceAddress)
 					.setKeepBond(false)
 					.setForceDfu(false)
-					.setPacketsReceiptNotificationsEnabled(true)
+					.setPacketsReceiptNotificationsEnabled(packetReceiptNotificationsValue > 0)
 					.setPacketsReceiptNotificationsValue(packetReceiptNotificationsValue)
+					.setPrepareDataObjectDelay(300)
 					.setUnsafeExperimentalButtonlessServiceInSecureDfuEnabled(true)
 					.setDisableNotification(true);
-			starter.setZip(fileUriStr);
+			if ("file".equals(fileUriStr.getScheme())) {
+				starter.setZip(fileUriStr.getPath());
+			} else {
+				starter.setZip(fileUriStr);
+			}
 
 			if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
 				DfuServiceInitiator.createDfuNotificationChannel(cordova.getContext());
