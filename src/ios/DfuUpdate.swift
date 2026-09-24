@@ -1,9 +1,10 @@
 import iOSDFULibrary
+import CoreBluetooth
 
-@objc(DfuUpdate) class DfuUpdate : CDVPlugin, CBCentralManagerDelegate, DFUServiceDelegate, DFUProgressDelegate  {
+@objc(DfuUpdate) class DfuUpdate : CDVPlugin, CBCentralManagerDelegate, DFUServiceDelegate, DFUProgressDelegate {
 
     var dfuCallbackId: String?
-    var manager = CBCentralManager()
+    var manager: CBCentralManager!
     var dfuController: DFUServiceController?
 
     @objc(pluginInitialize)
@@ -12,226 +13,189 @@ import iOSDFULibrary
         manager = CBCentralManager(delegate: self, queue: nil)
     }
 
+    // MARK: - Envoi des résultats
+
+    private func send(_ result: CDVPluginResult, keepCallback: Bool = false, to callbackId: String? = nil) {
+        guard let id = callbackId ?? dfuCallbackId else {
+            return
+        }
+        result.setKeepCallbackAs(keepCallback)
+        commandDelegate.send(result, callbackId: id)
+    }
+
+    private func error(_ message: String) -> CDVPluginResult {
+        return CDVPluginResult(status: CDVCommandStatus.error, messageAs: message)
+    }
+
+    // MARK: - Point d'entrée
+
     @objc(updateFirmware:)
     func updateFirmware(command: CDVInvokedUrlCommand) {
         commandDelegate.run {
             self.dfuCallbackId = command.callbackId
 
-            var pluginResult = CDVPluginResult(
-                status: CDVCommandStatus_ERROR
-            )
-
-            let options = command.argument(at: 0) as? NSDictionary;
-            if(options == nil) {
-                self.commandDelegate!.send(
-                    CDVPluginResult(
-                        status: CDVCommandStatus_ERROR,
-                        messageAs: "The first Argument must be the Configuration"
-                    ),
-                    callbackId: self.dfuCallbackId
-                )
-                return;
-            }
-
-            let deviceId = options?.value(forKey: "deviceId") as? String
-            let fileURL = options?.value(forKey: "fileUrl") as? String;
-            let packetReceiptNotificationsValue = options?.value(forKey: "packetReceiptNotificationsValue") as? NSInteger ?? 10;
-
-            if(deviceId == nil) {
-                self.commandDelegate!.send(
-                    CDVPluginResult(
-                        status: CDVCommandStatus_ERROR,
-                        messageAs: "Device id is required"
-                    ),
-                    callbackId: self.dfuCallbackId
-                )
-                return;
-            }
-
-            if(fileURL == nil) {
-                self.commandDelegate!.send(
-                    CDVPluginResult(
-                        status: CDVCommandStatus_ERROR,
-                        messageAs: "File URL is required"
-                    ),
-                    callbackId: self.dfuCallbackId
-                )
-                return;
-            }
-
-            if deviceId!.count < 1 {
-
-                self.commandDelegate!.send(
-                    CDVPluginResult(
-                        status: CDVCommandStatus_ERROR,
-                        messageAs: "Device ID is required"
-                    ),
-                    callbackId: self.dfuCallbackId
-
-                )
+            guard let options = command.argument(at: 0) as? NSDictionary else {
+                self.send(self.error("The first Argument must be the Configuration"))
                 return
             }
 
-            if (fileURL!.count < 1) {
+            let deviceId = options.value(forKey: "deviceId") as? String ?? ""
+            let fileURL = options.value(forKey: "fileUrl") as? String ?? ""
+            let packetReceiptNotificationsValue = options.value(forKey: "packetReceiptNotificationsValue") as? NSInteger ?? 10
 
-                self.commandDelegate!.send(
-                    CDVPluginResult(
-                        status: CDVCommandStatus_ERROR,
-                        messageAs: "File URL is required"
-                    ),
-                    callbackId: self.dfuCallbackId
-                )
+            if deviceId.isEmpty {
+                self.send(self.error("Device id is required"))
                 return
             }
 
-            if (deviceId!.count > 0 && fileURL!.count > 0) {
-                let sourceURL = self.getURI(url: fileURL!)
-
-                pluginResult = self.startUpgrade(deviceId: deviceId!, url: sourceURL, packetReceiptNotificationsValue: packetReceiptNotificationsValue);
+            if fileURL.isEmpty {
+                self.send(self.error("File URL is required"))
+                return
             }
 
+            guard let sourceURL = self.getURI(url: fileURL) else {
+                self.send(self.error("Invalid file URL: " + fileURL))
+                return
+            }
 
-            self.commandDelegate!.send(
-                pluginResult,
-                callbackId: command.callbackId
+            let (result, keep) = self.startUpgrade(
+                deviceId: deviceId,
+                url: sourceURL,
+                packetReceiptNotificationsValue: packetReceiptNotificationsValue
             )
+            self.send(result, keepCallback: keep)
         }
     }
 
-    func startUpgrade(deviceId: String, url: URL, packetReceiptNotificationsValue: NSInteger) -> CDVPluginResult {
-        let selectedFirmware = DFUFirmware(urlToZipFile: url)
-
-        if (!(selectedFirmware?.valid ?? true)) {
-            return CDVPluginResult(
-                status: CDVCommandStatus_ERROR,
-                messageAs: "Invalid firmware"
-            )
+    func startUpgrade(deviceId: String, url: URL, packetReceiptNotificationsValue: NSInteger) -> (CDVPluginResult, Bool) {
+        var waited = 0
+        while manager.state != .poweredOn && waited < 30 {
+            Thread.sleep(forTimeInterval: 0.1)
+            waited += 1
+        }
+        if manager.state != .poweredOn {
+            return (error("Bluetooth not ready"), false)
         }
 
-        let deviceUUID = UUID.init(uuidString: deviceId) ?? nil
-
-        if (deviceUUID == nil) {
-            return CDVPluginResult(
-                status: CDVCommandStatus_ERROR,
-                messageAs: "Address " + deviceId + " is not a valid UUID"
-            )
+        guard let selectedFirmware = DFUFirmware(urlToZipFile: url) else {
+            return (error("Firmware could not be read at " + url.path), false)
         }
 
-        let peripherals = manager.retrievePeripherals(withIdentifiers: [deviceUUID!])
-        if (peripherals.count < 1) {
-            return CDVPluginResult(
-                status: CDVCommandStatus_ERROR,
-                messageAs: "Device with address " + deviceId + " not found"
-            )
+        if !selectedFirmware.valid {
+            return (error("Invalid firmware"), false)
         }
 
-        let deviceP = peripherals[0];
+        guard let deviceUUID = UUID(uuidString: deviceId) else {
+            return (error("Address " + deviceId + " is not a valid UUID"), false)
+        }
 
-        //let initiator = DFUServiceInitiator(target: deviceP).with(firmware: selectedFirmware!)
+        let peripherals = manager.retrievePeripherals(withIdentifiers: [deviceUUID])
+        guard let target = peripherals.first else {
+            return (error("Device with address " + deviceId + " not found"), false)
+        }
+
         let initiator = DFUServiceInitiator(queue: DispatchQueue(label: "Other"))
 
         initiator.enableUnsafeExperimentalButtonlessServiceInSecureDfu = true
         initiator.packetReceiptNotificationParameter = UInt16(packetReceiptNotificationsValue)
         initiator.forceDfu = false
+        initiator.dataObjectPreparationDelay = 0.3
         initiator.delegate = self
         initiator.progressDelegate = self
 
-        //dfuController = initiator.start()!
-        dfuController = initiator.with(firmware: selectedFirmware!).start(target: deviceP)
+        dfuController = initiator.with(firmware: selectedFirmware).start(target: target)
 
-        let pluginResult = CDVPluginResult(
-            status: CDVCommandStatus_OK,
+        let started = CDVPluginResult(
+            status: CDVCommandStatus.ok,
             messageAs: deviceId + ":" + url.absoluteString
         )
-
-        pluginResult?.setKeepCallbackAs(true)
-
-        return pluginResult!
+        return (started, true)
     }
 
+    // MARK: - Délégués DFU
+
     func dfuStateDidChange(to state: DFUState) {
-        var stateStr: String = "unknown";
-        switch(state) {
-        case DFUState.connecting:
-            stateStr = "deviceConnecting"
-            break;
-        case DFUState.starting: stateStr = "dfuProcessStarting"; break;
-        case DFUState.enablingDfuMode: stateStr = "enablingDfuMode"; break;
-        case DFUState.uploading: stateStr = "firmwareUploading"; break;
-        case DFUState.validating: stateStr = "firmwareValidating"; break;
-        case DFUState.disconnecting: stateStr = "deviceDisconnecting"; break;
-        case DFUState.completed: stateStr = "dfuCompleted"; break;
-        case DFUState.aborted: stateStr = "dfuAborted"; break;
+        var stateStr = "unknown"
+        switch state {
+        case .connecting: stateStr = "deviceConnecting"
+        case .starting: stateStr = "dfuProcessStarting"
+        case .enablingDfuMode: stateStr = "enablingDfuMode"
+        case .uploading: stateStr = "firmwareUploading"
+        case .validating: stateStr = "firmwareValidating"
+        case .disconnecting: stateStr = "deviceDisconnecting"
+        case .completed: stateStr = "dfuCompleted"
+        case .aborted: stateStr = "dfuAborted"
+        @unknown default: stateStr = "unknown"
         }
 
-        let pluginResult = CDVPluginResult(
-            status: CDVCommandStatus_OK,
-            messageAs: ["status": stateStr]
+        let finished = state == .aborted || state == .completed
+        send(
+            CDVPluginResult(status: CDVCommandStatus.ok, messageAs: ["status": stateStr]),
+            keepCallback: !finished
         )
-        pluginResult?.setKeepCallbackAs(true)
-        self.commandDelegate.send(pluginResult, callbackId: dfuCallbackId)
 
-        if (state == DFUState.aborted || state == DFUState.completed) {
-            self.clearHandlers()
+        if finished {
+            clearHandlers()
         }
     }
 
     func dfuError(_ error: DFUError, didOccurWithMessage message: String) {
-        let pluginResult = CDVPluginResult(
-            status: CDVCommandStatus_ERROR,
-            messageAs: [
-                "errorMessage": message
-            ]
+        send(
+            CDVPluginResult(
+                status: CDVCommandStatus.error,
+                messageAs: [
+                    "message": message,
+                    "errorMessage": message,
+                    "error": error.rawValue,
+                    "status": "dfuAborted"
+                ]
+            )
         )
-
-        self.commandDelegate.send(pluginResult, callbackId: dfuCallbackId)
-        self.clearHandlers()
+        clearHandlers()
     }
 
     func dfuProgressDidChange(for part: Int, outOf totalParts: Int, to progress: Int, currentSpeedBytesPerSecond: Double, avgSpeedBytesPerSecond: Double) {
-        let message = [
+        let message: [String: Any] = [
             "status": "progressChanged",
             "progress": [
                 "percent": progress,
                 "speed": currentSpeedBytesPerSecond,
                 "avgSpeed": avgSpeedBytesPerSecond,
                 "currentPart": part,
-                "partsTotal": totalParts,
+                "partsTotal": totalParts
             ]
-            ] as [String : Any]
+        ]
 
-        let pluginResult = CDVPluginResult(
-            status: CDVCommandStatus_OK,
-            messageAs: message
-        )
-        pluginResult?.setKeepCallbackAs(true)
-        self.commandDelegate.send(pluginResult, callbackId: dfuCallbackId)
+        send(CDVPluginResult(status: CDVCommandStatus.ok, messageAs: message), keepCallback: true)
     }
 
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
-
     }
 
     func clearHandlers() {
-        self.dfuCallbackId = nil
-        self.dfuController = nil
-
-        self.pluginInitialize()
+        dfuCallbackId = nil
+        dfuController = nil
+        pluginInitialize()
     }
 
-    func getURI(url: String) -> URL  {
-        var filePath: String = ""
-        var resourceURL: NSURL = NSURL.init(string: url)!
-        if (url.hasPrefix("cdvfile://")) {
-            let filePlugin: CDVFile = commandDelegate.getCommandInstance("File") as! CDVFile
-            let url = CDVFilesystemURL.fileSystemURL(with: url)
-            filePath = filePlugin.filesystemPath(for: url)
-            if (filePath != "") {
-                resourceURL = NSURL.init(string: filePath)!
-            }
+    // MARK: - Résolution du fichier
+
+    func getURI(url: String) -> URL? {
+        if url.hasPrefix("cdvfile://") {
+            return nil
         }
 
-        return resourceURL as URL
+        if url.hasPrefix("file://") {
+            if let direct = URL(string: url) {
+                return direct
+            }
+            return URL(fileURLWithPath: url.replacingOccurrences(of: "file://", with: ""))
+        }
 
+        if url.hasPrefix("/") {
+            return URL(fileURLWithPath: url)
+        }
+
+        return URL(string: url)
     }
 }
